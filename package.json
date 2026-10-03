@@ -7,7 +7,7 @@
     "start": "node server.js",
     "dev": "vite",
     "build": "vite build",
-    "test": "node test-backend.js"
+    "test": "node test/test-backend.js"
   },
   "keywords": [
     "react",
