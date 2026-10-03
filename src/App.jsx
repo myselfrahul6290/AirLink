@@ -32,7 +32,8 @@ export default function App() {
     setActiveTransfers,
     showToast,
     addWsListener,
-    sendWsMessage
+    sendWsMessage,
+    getWsBufferedAmount
   } = useWebRTC();
 
   return (
@@ -112,6 +113,7 @@ export default function App() {
                 showToast={showToast}
                 addWsListener={addWsListener}
                 sendWsMessage={sendWsMessage}
+                getWsBufferedAmount={getWsBufferedAmount}
               />
             </div>
           )}

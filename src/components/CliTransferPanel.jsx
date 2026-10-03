@@ -5,7 +5,8 @@ export default function CliTransferPanel({
   lanUrl,
   showToast,
   addWsListener,
-  sendWsMessage
+  sendWsMessage,
+  getWsBufferedAmount
 }) {
   const [file, setFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
@@ -27,6 +28,9 @@ export default function CliTransferPanel({
   const xhrRef = useRef(null);
   const pollTimerRef = useRef(null);
   const isStreamingRef = useRef(false);
+  const abortControllerRef = useRef(null);
+  const isPausedRef = useRef(false);
+  const pauseResolverRef = useRef(null);
 
   // Automatically determine base origin (uses LAN URL if on localhost so external terminals can connect, else current origin)
   const isLocal = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
@@ -67,7 +71,7 @@ export default function CliTransferPanel({
   };
 
   // Trigger streaming upload ONLY when the terminal receiver connects
-  const startStreamingUpload = useCallback((session, fileToUpload) => {
+  const startStreamingUpload = useCallback(async (session, fileToUpload) => {
     if (isStreamingRef.current) return;
     isStreamingRef.current = true;
     setTransferStatus('streaming');
@@ -77,6 +81,136 @@ export default function CliTransferPanel({
       pollTimerRef.current = null;
     }
 
+    // Path 1: WebSocket binary streaming (bypasses Render/reverse proxy HTTP body buffering entirely)
+    if (serverConnected && sendWsMessage) {
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+      isPausedRef.current = false;
+      if (pauseResolverRef.current) {
+        pauseResolverRef.current();
+        pauseResolverRef.current = null;
+      }
+
+      const CHUNK_SIZE = 64 * 1024; // 64KB per chunk
+      const totalBytes = fileToUpload.size;
+      const codeBytes = new TextEncoder().encode(session.code); // 6-byte ASCII code
+      let offset = 0;
+      const startTime = Date.now();
+      let lastLoaded = 0;
+      let lastTime = startTime;
+      const speedSamples = [];
+
+      try {
+        while (offset < totalBytes) {
+          if (abortController.signal.aborted) {
+            return;
+          }
+
+          // Flow control 1: Wait if backend sent cli-pause (receiver terminal socket buffer full)
+          if (isPausedRef.current) {
+            await new Promise((resolve) => {
+              pauseResolverRef.current = resolve;
+            });
+            if (abortController.signal.aborted) return;
+          }
+
+          // Flow control 2: Throttle if browser WebSocket output buffer is filling up
+          if (getWsBufferedAmount && getWsBufferedAmount() > 256 * 1024) {
+            await new Promise((resolve) => {
+              const checkDrain = () => {
+                if (abortController.signal.aborted) {
+                  resolve();
+                  return;
+                }
+                if (!getWsBufferedAmount || getWsBufferedAmount() <= 64 * 1024) {
+                  resolve();
+                } else {
+                  setTimeout(checkDrain, 15);
+                }
+              };
+              setTimeout(checkDrain, 15);
+            });
+            if (abortController.signal.aborted) return;
+          }
+
+          const end = Math.min(offset + CHUNK_SIZE, totalBytes);
+          const slice = fileToUpload.slice(offset, end);
+          const arrayBuffer = await slice.arrayBuffer();
+
+          if (abortController.signal.aborted) return;
+
+          // Packet structure: [6 bytes ASCII code][chunk bytes]
+          const packet = new Uint8Array(6 + arrayBuffer.byteLength);
+          packet.set(codeBytes, 0);
+          packet.set(new Uint8Array(arrayBuffer), 6);
+
+          const sent = sendWsMessage(packet.buffer);
+          if (!sent) {
+            throw new Error('WebSocket connection interrupted during upload');
+          }
+
+          offset = end;
+
+          // Live progress & rolling average speed calculation
+          const now = Date.now();
+          const timeDelta = (now - lastTime) / 1000;
+          if (timeDelta >= 0.25 || offset === totalBytes) {
+            const bytesDelta = offset - lastLoaded;
+            const currentSpeed = bytesDelta / (timeDelta || 0.001);
+            speedSamples.push(currentSpeed);
+            if (speedSamples.length > 5) speedSamples.shift();
+
+            const avgSpeed = speedSamples.reduce((a, b) => a + b, 0) / speedSamples.length;
+            const remainingBytes = totalBytes - offset;
+            const etaSecs = avgSpeed > 0 ? remainingBytes / avgSpeed : 0;
+            const percent = Math.min(Math.round((offset / totalBytes) * 100), 100);
+
+            setProgress({
+              percent,
+              loaded: offset,
+              total: totalBytes,
+              speedText: formatBytes(avgSpeed) + '/s',
+              etaText: formatEta(etaSecs)
+            });
+
+            lastLoaded = offset;
+            lastTime = now;
+          }
+
+          // Small cooperative yield to browser event loop
+          if (offset % (CHUNK_SIZE * 4) === 0) {
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        }
+
+        // Send completion message to backend
+        sendWsMessage({ type: 'cli-upload-finish', code: session.code });
+
+        setProgress((prev) => ({
+          ...prev,
+          percent: 100,
+          loaded: totalBytes,
+          speedText: 'Complete',
+          etaText: '0s'
+        }));
+        setTransferStatus('completed');
+        isStreamingRef.current = false;
+        showToast?.('Transfer Complete', `${fileToUpload.name} streamed directly to terminal!`, 'success');
+        return;
+      } catch (err) {
+        if (abortController.signal.aborted) return;
+        console.warn('WebSocket streaming failed, attempting HTTP POST fallback:', err);
+        // Fall through to Path 2 (HTTP POST) if WS failed at the very beginning
+        if (offset > 0) {
+          setTransferStatus('error');
+          isStreamingRef.current = false;
+          showToast?.('Transfer Interrupted', 'WebSocket connection lost.', 'error');
+          return;
+        }
+      }
+    }
+
+    // Path 2: HTTP POST Fallback (for environments where WS is unavailable)
     const startTime = Date.now();
     let lastLoaded = 0;
     let lastTime = startTime;
@@ -148,7 +282,7 @@ export default function CliTransferPanel({
     xhr.open('POST', `/api/cli-upload/${session.code}`);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.send(fileToUpload);
-  }, [showToast]);
+  }, [serverConnected, sendWsMessage, getWsBufferedAmount, showToast]);
 
   // Register file metadata only (file data stays in browser memory until terminal connects)
   const handleRegisterFile = async (selectedFile) => {
@@ -223,7 +357,7 @@ export default function CliTransferPanel({
     }
   };
 
-  // Listen for terminal connection event from server
+  // Listen for terminal connection and backpressure events from server
   useEffect(() => {
     if (!cliSession || !addWsListener) return;
 
@@ -235,10 +369,23 @@ export default function CliTransferPanel({
         }
       } else if (data.type === 'cli-receiver-disconnected' && data.code === cliSession.code) {
         if (isStreamingRef.current) {
+          if (abortControllerRef.current) abortControllerRef.current.abort();
+          if (pauseResolverRef.current) {
+            pauseResolverRef.current();
+            pauseResolverRef.current = null;
+          }
           if (xhrRef.current) xhrRef.current.abort();
           isStreamingRef.current = false;
           setTransferStatus('error');
           showToast?.('Terminal Disconnected', 'Receiver closed connection prematurely.', 'error');
+        }
+      } else if (data.type === 'cli-pause' && data.code === cliSession.code) {
+        isPausedRef.current = true;
+      } else if (data.type === 'cli-resume' && data.code === cliSession.code) {
+        isPausedRef.current = false;
+        if (pauseResolverRef.current) {
+          pauseResolverRef.current();
+          pauseResolverRef.current = null;
         }
       }
     });
@@ -293,10 +440,18 @@ export default function CliTransferPanel({
 
   // Reset / Send another file
   const handleReset = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    if (pauseResolverRef.current) {
+      pauseResolverRef.current();
+      pauseResolverRef.current = null;
+    }
     if (xhrRef.current) {
       try { xhrRef.current.abort(); } catch (e) {}
     }
     if (cliSession) {
+      sendWsMessage?.({ type: 'cli-upload-abort', code: cliSession.code });
       fetch(`/api/cli-cancel/${cliSession.code}`, { method: 'DELETE' }).catch(() => {});
     }
     if (pollTimerRef.current) {
@@ -304,6 +459,7 @@ export default function CliTransferPanel({
       pollTimerRef.current = null;
     }
     isStreamingRef.current = false;
+    isPausedRef.current = false;
     setFile(null);
     setCliSession(null);
     setTransferStatus('idle');

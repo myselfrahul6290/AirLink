@@ -59,6 +59,9 @@ const handleCliDownload = (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`);
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering on reverse proxies for live streaming
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
 
   console.log(`[CLI Receiver Connected] Code: ${transfer.code} from ${req.ip} (${req.headers['user-agent'] || 'curl'})`);
 

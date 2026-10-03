@@ -18,7 +18,9 @@ class SignalingService {
       'initiate-connect': this.handleInitiateConnect.bind(this),
       'signal-relay': this.handleSignalRelay.bind(this),
       'ping': this.handlePing.bind(this),
-      'cli-bind-token': this.handleCliBindToken.bind(this)
+      'cli-bind-token': this.handleCliBindToken.bind(this),
+      'cli-upload-finish': this.handleCliUploadFinish.bind(this),
+      'cli-upload-abort': this.handleCliUploadAbort.bind(this)
     };
   }
 
@@ -65,7 +67,13 @@ class SignalingService {
     socketsForIp.add(ws);
     console.log(`[Socket connected] ID: ${socketId} | ${ip}:${port} | Active for IP: ${socketsForIp.size}`);
 
-    ws.on('message', (message) => {
+    ws.on('message', (message, isBinary) => {
+      // Check if message is a binary file chunk (starts with 6-byte code, not JSON '{')
+      if (isBinary || (Buffer.isBuffer(message) && message.length >= 6 && message[0] !== 123)) {
+        this.handleBinaryChunk(ws, message);
+        return;
+      }
+
       try {
         const data = JSON.parse(message);
         const handler = this.messageHandlers[data.type];
@@ -235,6 +243,77 @@ class SignalingService {
 
   handleCliBindToken(ws, data) {
     transferService.bindWebSocket(data.code, ws);
+  }
+
+  handleBinaryChunk(ws, buffer) {
+    if (!buffer || buffer.length < 6) return;
+    const code = buffer.subarray(0, 6).toString('ascii');
+    const chunk = buffer.subarray(6);
+
+    const transfer = transferService.getTransfer(code);
+    if (!transfer || !transfer.receiverRes || transfer.receiverRes.writableEnded) {
+      return;
+    }
+
+    if (transfer.status !== 'streaming') {
+      transfer.status = 'streaming';
+      console.log(`[CLI WebSocket Streaming] Code: ${transfer.code} -> Real-time direct RAM pipe to terminal`);
+    }
+
+    transfer.bytesTransferred += chunk.length;
+    const canWrite = transfer.receiverRes.write(chunk);
+
+    if (!canWrite) {
+      // Flow control backpressure: pause browser read loop until terminal socket drains
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'cli-pause', code }));
+      }
+      transfer.receiverRes.once('drain', () => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'cli-resume', code }));
+        }
+      });
+    }
+
+    const now = Date.now();
+    if (!transfer.lastProgressTime || now - transfer.lastProgressTime >= 300) {
+      transfer.lastProgressTime = now;
+      transferService.notifyWs(transfer, {
+        type: 'cli-transfer-progress',
+        code: transfer.code,
+        bytesTransferred: transfer.bytesTransferred,
+        totalBytes: transfer.size
+      });
+    }
+  }
+
+  handleCliUploadFinish(ws, data) {
+    const transfer = transferService.getTransfer(data.code);
+    if (!transfer || !transfer.receiverRes || transfer.receiverRes.writableEnded) return;
+
+    transfer.status = 'completed';
+    console.log(`[CLI WebSocket Transfer Complete] Code: ${transfer.code} | Streamed: ${transfer.bytesTransferred} bytes.`);
+
+    try {
+      transfer.receiverRes.end();
+    } catch (e) {}
+
+    transferService.notifyWs(transfer, {
+      type: 'cli-transfer-complete',
+      code: transfer.code,
+      bytesTransferred: transfer.bytesTransferred
+    });
+    transferService.cleanupTransfer(transfer.code, 8000);
+  }
+
+  handleCliUploadAbort(ws, data) {
+    const transfer = transferService.getTransfer(data.code);
+    if (!transfer) return;
+    transfer.status = 'cancelled';
+    console.log(`[CLI WebSocket Transfer Aborted] Code: ${transfer.code}`);
+    if (transfer.receiverRes && !transfer.receiverRes.writableEnded) {
+      try { transfer.receiverRes.destroy(); } catch (e) {}
+    }
   }
 
   handleClose(ws, ip, socketId) {

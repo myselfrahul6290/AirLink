@@ -618,12 +618,20 @@ export function useWebRTC() {
     };
   }, []);
 
-  const sendWsMessage = useCallback((msgObj) => {
+  const sendWsMessage = useCallback((payload) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msgObj));
+      if (typeof payload === 'string' || payload instanceof ArrayBuffer || payload instanceof Uint8Array || payload instanceof Blob) {
+        wsRef.current.send(payload);
+      } else {
+        wsRef.current.send(JSON.stringify(payload));
+      }
       return true;
     }
     return false;
+  }, []);
+
+  const getWsBufferedAmount = useCallback(() => {
+    return wsRef.current ? wsRef.current.bufferedAmount : 0;
   }, []);
 
   // --- SETUP WEBSOCKET CONNECTION ---
@@ -824,6 +832,7 @@ export function useWebRTC() {
     setActiveTransfers,
     showToast,
     addWsListener,
-    sendWsMessage
+    sendWsMessage,
+    getWsBufferedAmount
   };
 }
