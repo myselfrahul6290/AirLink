@@ -4,7 +4,7 @@ const WebSocket = require('ws');
 
 // Test on custom port to avoid collision
 process.env.PORT = '3999';
-require('./server.js');
+require('../server.js');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));

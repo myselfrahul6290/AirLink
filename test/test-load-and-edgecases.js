@@ -2,8 +2,8 @@
 
 const http = require('http');
 const WebSocket = require('ws');
-const app = require('./backend/app');
-const SignalingService = require('./backend/services/signalingService');
+const app = require('../backend/app');
+const SignalingService = require('../backend/services/signalingService');
 
 const TEST_PORT = 4999;
 const server = http.createServer(app);
