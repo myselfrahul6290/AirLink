@@ -5,8 +5,10 @@ const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' }
-  ]
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ],
+  iceCandidatePoolSize: 10
 };
 
 export function useWebRTC() {
@@ -53,6 +55,8 @@ export function useWebRTC() {
   const activeReceivingFileRef = useRef(null);
   const autoConnectTargetRef = useRef(null);
   const localIdRef = useRef(getOrCreateDeviceDeskId());
+  const pendingIceCandidatesRef = useRef([]);
+  const connectionTimeoutRef = useRef(null);
 
   // --- PARSE URL PARAMS ONCE (QR SCAN AUTO-LINK) ---
   useEffect(() => {
@@ -112,6 +116,12 @@ export function useWebRTC() {
       peerConnectionRef.current = null;
     }
 
+    if (connectionTimeoutRef.current) {
+      clearTimeout(connectionTimeoutRef.current);
+      connectionTimeoutRef.current = null;
+    }
+    pendingIceCandidatesRef.current = [];
+
     setActivePeerId(null);
     activePeerIdRef.current = null;
     setIsWorkspaceOpen(false);
@@ -163,6 +173,7 @@ export function useWebRTC() {
       peerConnectionRef.current.close();
     }
 
+    pendingIceCandidatesRef.current = [];
     const pc = new RTCPeerConnection(rtcConfig);
     peerConnectionRef.current = pc;
 
@@ -234,13 +245,33 @@ export function useWebRTC() {
 
       if (payload.sdp) {
         await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+
+        // Drain any buffered trickle candidates
+        while (pendingIceCandidatesRef.current.length > 0) {
+          const queuedCand = pendingIceCandidatesRef.current.shift();
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(queuedCand));
+          } catch (err) {
+            console.warn('Error applying queued candidate:', err);
+          }
+        }
+
         if (pc.remoteDescription.type === 'offer') {
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           sendSignalingSignal(senderId, { sdp: pc.localDescription });
         }
       } else if (payload.candidate) {
-        await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+        // Buffer candidate if remoteDescription is not yet set
+        if (!pc.remoteDescription || !pc.remoteDescription.type) {
+          pendingIceCandidatesRef.current.push(payload.candidate);
+        } else {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+          } catch (e) {
+            console.warn('Error adding ICE candidate directly:', e);
+          }
+        }
       }
     } catch (e) {
       console.error('Error in handleSignalingSignal:', e);
@@ -256,6 +287,10 @@ export function useWebRTC() {
 
     channel.onopen = () => {
       console.log('React Data Channel Open!');
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current);
+        connectionTimeoutRef.current = null;
+      }
       setIsConnecting(false);
       setIsWorkspaceOpen(true);
       setActivePeerId(activePeerIdRef.current);
@@ -530,15 +565,28 @@ export function useWebRTC() {
       return;
     }
 
+    // Robust normalization for 6-digit codes
+    const cleanDigits = String(targetId).replace(/\D/g, '');
+    const formattedTarget = cleanDigits.length === 6 
+      ? `${cleanDigits.slice(0, 3)}-${cleanDigits.slice(3, 6)}` 
+      : targetId.trim();
+
     setIsConnecting(true);
     connectionDirectionRef.current = 'sender';
-    activePeerIdRef.current = targetId;
+    activePeerIdRef.current = formattedTarget;
+
+    // Timeout watchdog (prevents indefinite freeze)
+    if (connectionTimeoutRef.current) clearTimeout(connectionTimeoutRef.current);
+    connectionTimeoutRef.current = setTimeout(() => {
+      showToast('Connection Timeout', 'Failed to link in time. Please verify the code and retry.', 'error');
+      disconnectSession();
+    }, 18000);
 
     wsRef.current.send(JSON.stringify({
       type: 'initiate-connect',
-      targetId: targetId
+      targetId: formattedTarget
     }));
-  }, [showToast]);
+  }, [showToast, disconnectSession]);
 
   // --- HELPER: BYTES FORMATTER ---
   function formatBytes(bytes, decimals = 2) {
@@ -559,6 +607,24 @@ export function useWebRTC() {
     disconnectSession,
     showToast
   };
+
+  // External WebSocket event listeners and message dispatcher
+  const wsListenersRef = useRef(new Set());
+
+  const addWsListener = useCallback((handler) => {
+    wsListenersRef.current.add(handler);
+    return () => {
+      wsListenersRef.current.delete(handler);
+    };
+  }, []);
+
+  const sendWsMessage = useCallback((msgObj) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(msgObj));
+      return true;
+    }
+    return false;
+  }, []);
 
   // --- SETUP WEBSOCKET CONNECTION ---
   useEffect(() => {
@@ -613,6 +679,11 @@ export function useWebRTC() {
         try {
           const data = JSON.parse(event.data);
           const cb = callbacksRef.current;
+          
+          // Notify external subscribers (e.g., CLI transfer panel)
+          wsListenersRef.current.forEach((listener) => {
+            try { listener(data); } catch (err) { console.error('Error in WS subscriber:', err); }
+          });
           
           switch (data.type) {
             case 'registered':
@@ -751,6 +822,8 @@ export function useWebRTC() {
     disconnectSession,
     removeToast,
     setActiveTransfers,
-    showToast
+    showToast,
+    addWsListener,
+    sendWsMessage
   };
 }

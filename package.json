@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "node test-backend.js"
   },
   "keywords": [
     "react",
