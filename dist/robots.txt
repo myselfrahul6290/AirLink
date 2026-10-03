@@ -1,0 +1,6 @@
+# Robots.txt for AirLink P2P File Sharing (https://p2p.iamrahulshaw.in/)
+User-agent: *
+Allow: /
+
+# Sitemap location
+Sitemap: https://p2p.iamrahulshaw.in/sitemap.xml

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Dark Tech Glow Gradient -->
+    <linearGradient id="cyberGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6" />
+      <stop offset="100%" stop-color="#06b6d4" />
+    </linearGradient>
+    
+    <!-- Premium Drop Shadow -->
+    <filter id="neonShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#8b5cf6" flood-opacity="0.3" />
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#06b6d4" flood-opacity="0.2" />
+    </filter>
+  </defs>
+
+  <!-- Hexagonal outer network structure -->
+  <g filter="url(#neonShadow)">
+    <!-- Base Shape: Futuristic Linked Prism -->
+    <path d="M256,40 L430,140 L430,340 L256,440 L82,340 L82,140 Z" 
+          fill="none" 
+          stroke="url(#cyberGlow)" 
+          stroke-width="24" 
+          stroke-linejoin="round" 
+          stroke-linecap="round" />
+          
+    <!-- Core interlocking triangle link (represents P2P connection) -->
+    <polygon points="256,120 370,300 142,300" 
+             fill="none" 
+             stroke="url(#cyberGlow)" 
+             stroke-width="16" 
+             stroke-linejoin="round" 
+             stroke-linecap="round" />
+             
+    <polygon points="256,380 142,200 370,200" 
+             fill="none" 
+             stroke="url(#cyberGlow)" 
+             stroke-width="16" 
+             stroke-linejoin="round" 
+             stroke-linecap="round" 
+             opacity="0.8" />
+             
+    <!-- Glowing Network Nodes -->
+    <circle cx="256" cy="40" r="16" fill="#06b6d4" />
+    <circle cx="430" cy="140" r="16" fill="#8b5cf6" />
+    <circle cx="430" cy="340" r="16" fill="#06b6d4" />
+    <circle cx="256" cy="440" r="16" fill="#8b5cf6" />
+    <circle cx="82" cy="340" r="16" fill="#06b6d4" />
+    <circle cx="82" cy="140" r="16" fill="#8b5cf6" />
+    
+    <!-- Central Node -->
+    <circle cx="256" cy="250" r="32" fill="url(#cyberGlow)" />
+  </g>
+</svg>
